@@ -1,10 +1,9 @@
-# Redpanda Shadow Linking Demo
+# Kroxylicious Topic Renaming Demo (with Redpanda Shadowing)
 
-This demo shows Redpanda's native **shadow linking** feature — a built-in disaster recovery mechanism that continuously replicates topics, consumer group offsets, and Schema Registry data from a source cluster to a shadow cluster running on Kubernetes.
+This demo shows [Kroxylicious](https://kroxylicious.io/) combined with Redpanda's native **shadow linking** feature — a built-in disaster recovery mechanism that continuously replicates topics, consumer group offsets, and Schema Registry data from a source cluster to a shadow cluster running on Kubernetes.
 
-It also uses [Kroxylicious](https://kroxylicious.io/) to test shadow linking through a Kafka
-protocol proxy: a Kroxylicious virtual cluster sits in front of the source cluster and, via a small
-custom filter, presents every topic under a `p_` prefix. The ShadowLink reads from that proxy
+It tests shadow linking through a Kafka protocol proxy: a Kroxylicious virtual cluster sits in front of the source
+cluster and, via a small custom filter, presents every topic under a `p_` prefix. The ShadowLink reads from that proxy
 instead of talking to the source cluster directly, so a healthy shadow — with `p_`-prefixed topics
 — is proof that shadowing keeps working end-to-end through the proxy. See
 [What Gets Deployed](#what-gets-deployed) and [Testing Through the Kroxylicious Proxy](#testing-through-the-kroxylicious-proxy) below,
