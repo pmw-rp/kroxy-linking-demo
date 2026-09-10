@@ -7,8 +7,14 @@ import io.kroxylicious.kafka.common.message.DescribeConfigsRequestData;
 import io.kroxylicious.kafka.common.message.DescribeConfigsResponseData;
 import io.kroxylicious.kafka.common.message.FetchRequestData;
 import io.kroxylicious.kafka.common.message.FetchResponseData;
+import io.kroxylicious.kafka.common.message.FindCoordinatorRequestData;
+import io.kroxylicious.kafka.common.message.FindCoordinatorResponseData;
+import io.kroxylicious.kafka.common.message.JoinGroupRequestData;
+import io.kroxylicious.kafka.common.message.ListGroupsResponseData;
 import io.kroxylicious.kafka.common.message.MetadataRequestData;
 import io.kroxylicious.kafka.common.message.MetadataResponseData;
+import io.kroxylicious.kafka.common.message.OffsetFetchRequestData;
+import io.kroxylicious.kafka.common.message.OffsetFetchResponseData;
 import io.kroxylicious.kafka.common.message.RequestHeaderData;
 import io.kroxylicious.kafka.common.message.ResponseHeaderData;
 import io.kroxylicious.testing.filter.assertj.MockFilterContextAssert;
@@ -24,6 +30,12 @@ class TopicPrefixerFilterTest {
     private static final short METADATA_VERSION = 12;
     private static final short FETCH_VERSION = 15;
     private static final short DESCRIBE_CONFIGS_VERSION = 4;
+    private static final short FIND_COORDINATOR_VERSION = 4;
+    private static final short OFFSET_FETCH_VERSION = 7;
+    private static final short LIST_GROUPS_VERSION = 4;
+    private static final short JOIN_GROUP_VERSION = 9;
+    private static final byte COORDINATOR_TYPE_GROUP = 0;
+    private static final byte COORDINATOR_TYPE_TRANSACTION = 1;
 
     private TopicPrefixerFilter filter;
 
@@ -183,5 +195,144 @@ class TopicPrefixerFilterTest {
                 .isForwardResponse()
                 .hasMessageInstanceOfSatisfying(DescribeConfigsResponseData.class,
                         forwarded -> assertThat(forwarded.results().get(0).resourceName()).isEqualTo("p_foo")));
+    }
+
+    @Test
+    void stripsGroupIdAndTopicNameFromOffsetFetchRequest() {
+        var header = new RequestHeaderData();
+        var request = new OffsetFetchRequestData();
+        request.setGroupId("p_my-group");
+        var topic = new OffsetFetchRequestData.OffsetFetchRequestTopic();
+        topic.setName("p_foo");
+        request.setTopics(List.of(topic));
+        var context = MockFilterContext.builder(header, request).build();
+
+        var stage = filter.onOffsetFetchRequest(OFFSET_FETCH_VERSION, header, request, context);
+
+        assertThat(stage).succeedsWithin(Duration.ZERO).satisfies(result -> MockFilterContextAssert.assertThat(result)
+                .isForwardRequest()
+                .hasMessageInstanceOfSatisfying(OffsetFetchRequestData.class, forwarded -> {
+                    assertThat(forwarded.groupId()).isEqualTo("my-group");
+                    assertThat(forwarded.topics().get(0).name()).isEqualTo("foo");
+                }));
+    }
+
+    @Test
+    void addsPrefixToGroupIdAndTopicNameInOffsetFetchResponse() {
+        var header = new ResponseHeaderData();
+        var response = new OffsetFetchResponseData();
+        var topic = new OffsetFetchResponseData.OffsetFetchResponseTopic();
+        topic.setName("foo");
+        response.setTopics(List.of(topic));
+        var group = new OffsetFetchResponseData.OffsetFetchResponseGroup();
+        group.setGroupId("my-group");
+        var groupTopic = new OffsetFetchResponseData.OffsetFetchResponseTopics();
+        groupTopic.setName("foo");
+        group.setTopics(List.of(groupTopic));
+        response.setGroups(List.of(group));
+        var context = MockFilterContext.builder(header, response).build();
+
+        var stage = filter.onOffsetFetchResponse(OFFSET_FETCH_VERSION, header, response, context);
+
+        assertThat(stage).succeedsWithin(Duration.ZERO).satisfies(result -> MockFilterContextAssert.assertThat(result)
+                .isForwardResponse()
+                .hasMessageInstanceOfSatisfying(OffsetFetchResponseData.class, forwarded -> {
+                    assertThat(forwarded.topics().get(0).name()).isEqualTo("p_foo");
+                    assertThat(forwarded.groups().get(0).groupId()).isEqualTo("p_my-group");
+                    assertThat(forwarded.groups().get(0).topics().get(0).name()).isEqualTo("p_foo");
+                }));
+    }
+
+    @Test
+    void addsPrefixToGroupIdInListGroupsResponse() {
+        var header = new ResponseHeaderData();
+        var response = new ListGroupsResponseData();
+        var group = new ListGroupsResponseData.ListedGroup();
+        group.setGroupId("my-group");
+        response.setGroups(List.of(group));
+        var context = MockFilterContext.builder(header, response).build();
+
+        var stage = filter.onListGroupsResponse(LIST_GROUPS_VERSION, header, response, context);
+
+        assertThat(stage).succeedsWithin(Duration.ZERO).satisfies(result -> MockFilterContextAssert.assertThat(result)
+                .isForwardResponse()
+                .hasMessageInstanceOfSatisfying(ListGroupsResponseData.class,
+                        forwarded -> assertThat(forwarded.groups().get(0).groupId()).isEqualTo("p_my-group")));
+    }
+
+    @Test
+    void stripsGroupIdFromJoinGroupRequest() {
+        var header = new RequestHeaderData();
+        var request = new JoinGroupRequestData();
+        request.setGroupId("p_my-group");
+        var context = MockFilterContext.builder(header, request).build();
+
+        var stage = filter.onJoinGroupRequest(JOIN_GROUP_VERSION, header, request, context);
+
+        assertThat(stage).succeedsWithin(Duration.ZERO).satisfies(result -> MockFilterContextAssert.assertThat(result)
+                .isForwardRequest()
+                .hasMessageInstanceOfSatisfying(JoinGroupRequestData.class,
+                        forwarded -> assertThat(forwarded.groupId()).isEqualTo("my-group")));
+    }
+
+    @Test
+    void findCoordinatorRoundTripRenamesGroupLookup() {
+        var reqHeader = new RequestHeaderData();
+        reqHeader.setCorrelationId(42);
+        var request = new FindCoordinatorRequestData();
+        request.setKeyType(COORDINATOR_TYPE_GROUP);
+        request.setCoordinatorKeys(List.of("p_my-group"));
+        var reqContext = MockFilterContext.builder(reqHeader, request).build();
+
+        var reqStage = filter.onFindCoordinatorRequest(FIND_COORDINATOR_VERSION, reqHeader, request, reqContext);
+        assertThat(reqStage).succeedsWithin(Duration.ZERO).satisfies(result -> MockFilterContextAssert.assertThat(result)
+                .isForwardRequest()
+                .hasMessageInstanceOfSatisfying(FindCoordinatorRequestData.class,
+                        forwarded -> assertThat(forwarded.coordinatorKeys()).containsExactly("my-group")));
+
+        var respHeader = new ResponseHeaderData();
+        respHeader.setCorrelationId(42);
+        var response = new FindCoordinatorResponseData();
+        var coordinator = new FindCoordinatorResponseData.Coordinator();
+        coordinator.setKey("my-group");
+        response.setCoordinators(List.of(coordinator));
+        var respContext = MockFilterContext.builder(respHeader, response).build();
+
+        var respStage = filter.onFindCoordinatorResponse(FIND_COORDINATOR_VERSION, respHeader, response, respContext);
+        assertThat(respStage).succeedsWithin(Duration.ZERO).satisfies(result -> MockFilterContextAssert.assertThat(result)
+                .isForwardResponse()
+                .hasMessageInstanceOfSatisfying(FindCoordinatorResponseData.class,
+                        forwarded -> assertThat(forwarded.coordinators().get(0).key()).isEqualTo("p_my-group")));
+    }
+
+    @Test
+    void findCoordinatorLeavesTransactionLookupUntouched() {
+        var reqHeader = new RequestHeaderData();
+        reqHeader.setCorrelationId(43);
+        var request = new FindCoordinatorRequestData();
+        request.setKeyType(COORDINATOR_TYPE_TRANSACTION);
+        request.setCoordinatorKeys(List.of("my-txn-id"));
+        var reqContext = MockFilterContext.builder(reqHeader, request).build();
+
+        var reqStage = filter.onFindCoordinatorRequest(FIND_COORDINATOR_VERSION, reqHeader, request, reqContext);
+        assertThat(reqStage).succeedsWithin(Duration.ZERO).satisfies(result -> MockFilterContextAssert.assertThat(result)
+                .isForwardRequest()
+                .hasMessageInstanceOfSatisfying(FindCoordinatorRequestData.class,
+                        forwarded -> assertThat(forwarded.coordinatorKeys()).containsExactly("my-txn-id")));
+
+        var respHeader = new ResponseHeaderData();
+        respHeader.setCorrelationId(43);
+        var response = new FindCoordinatorResponseData();
+        var coordinator = new FindCoordinatorResponseData.Coordinator();
+        coordinator.setKey("my-txn-id");
+        response.setCoordinators(List.of(coordinator));
+        var respContext = MockFilterContext.builder(respHeader, response).build();
+
+        // Not preceded by a *group* lookup with this correlation id, so the response must be left alone.
+        var respStage = filter.onFindCoordinatorResponse(FIND_COORDINATOR_VERSION, respHeader, response, respContext);
+        assertThat(respStage).succeedsWithin(Duration.ZERO).satisfies(result -> MockFilterContextAssert.assertThat(result)
+                .isForwardResponse()
+                .hasMessageInstanceOfSatisfying(FindCoordinatorResponseData.class,
+                        forwarded -> assertThat(forwarded.coordinators().get(0).key()).isEqualTo("my-txn-id")));
     }
 }

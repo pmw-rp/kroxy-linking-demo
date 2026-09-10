@@ -61,10 +61,11 @@ The ShadowLink (`resources/shadow-link.yaml`) is configured to replicate:
 
 Because the ShadowLink's `sourceCluster` is the Kroxylicious proxy virtual cluster
 (`resources/kroxylicious-proxy.yaml`), and that proxy's `topic-prefixer` filter presents every topic
-with a `p_` prefix, every topic discovered and replicated by the ShadowLink shows up on the shadow
-cluster with that prefix — even though the real topic on the source cluster is never renamed. This
-is visible throughout the demos below: e.g. a topic created as `basic` on the source cluster appears
-as `p_basic` on the shadow cluster.
+**and consumer group** with a `p_` prefix, every topic and consumer group discovered and replicated
+by the ShadowLink shows up on the shadow cluster with that prefix — even though the real topic/group
+on the source cluster is never renamed. This is visible throughout the demos below: e.g. a topic
+created as `basic` on the source cluster appears as `p_basic` on the shadow cluster, and a consumer
+group created as `consumer-group-foo` appears as `p_consumer-group-foo`.
 
 You can see both sides of this at once:
 
@@ -77,7 +78,9 @@ rpk --profile shadow topic list
 ```
 
 See [kroxylicious/topic-prefixer/README.md](kroxylicious/topic-prefixer/README.md) for why a custom
-filter is needed for this rather than Kroxylicious's built-in `MultiTenant` filter.
+filter is needed for this rather than Kroxylicious's built-in `MultiTenant` filter, and
+[kroxylicious/topic-prefixer/CONSUMER_GROUP_RENAMING.md](kroxylicious/topic-prefixer/CONSUMER_GROUP_RENAMING.md)
+for how (and how safely) the same renaming extends to consumer groups.
 
 ## Demos
 
@@ -109,7 +112,7 @@ Demonstrates disaster recovery: consumer group offsets replicate from source to 
 
 1. `1-create-topic-on-source.sh` — creates topic `foo` on source
 2. `2-produce-and-consume-on-source.sh` — produces records 1–5 and consumes them with `consumer-group-foo`
-3. `3-show-consumer-groups.sh` — shows consumer group offset state on source
+3. `3-show-consumer-groups.sh` — shows consumer group offset state on source, and on shadow as `p_consumer-group-foo`
 4. `4-failover.sh` — executes `rpk shadow failover disaster-recovery-link --all --no-confirm`
-5. `5-produce-and-consume-on-shadow.sh` — produces records 6–10 to shadow and consumes with the same consumer group
+5. `5-produce-and-consume-on-shadow.sh` — produces records 6–10 to shadow and consumes with the same (now `p_`-prefixed) consumer group
 6. `6-show-consumer-group-on-shadow.sh` — confirms consumer group offsets have been migrated and are current
