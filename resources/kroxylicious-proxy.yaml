@@ -52,7 +52,13 @@ metadata:
 spec:
   type: demo.topicprefixer.TopicPrefixer
   configTemplate:
-    prefix: "p_"
+    # Topics and consumer groups are renamed independently - each can use either a fixed prefix
+    # (as here) or an explicit before/after "mapping" instead. See
+    # kroxylicious/topic-prefixer/README.md and CONSUMER_GROUP_RENAMING.md.
+    topics:
+      prefix: "p_"
+    groups:
+      prefix: "p_"
 ---
 apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualKafkaCluster

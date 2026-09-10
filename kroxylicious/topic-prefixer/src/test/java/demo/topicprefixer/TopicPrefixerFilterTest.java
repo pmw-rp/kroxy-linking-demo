@@ -41,7 +41,9 @@ class TopicPrefixerFilterTest {
 
     @BeforeEach
     void beforeEach() {
-        filter = new TopicPrefixerFilter(PREFIX);
+        // Same prefix for both, matching this test class's pre-existing behaviour; independent
+        // topic/group renaming is covered separately by TopicPrefixerIT.
+        filter = new TopicPrefixerFilter(new PrefixRenamer(PREFIX), new PrefixRenamer(PREFIX));
     }
 
     @Test

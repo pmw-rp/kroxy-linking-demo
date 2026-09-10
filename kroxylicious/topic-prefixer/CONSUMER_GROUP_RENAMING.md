@@ -36,8 +36,14 @@ not regress a path that already worked despite the filter's ignorance of it.
 
 ## What's implemented
 
-`TopicPrefixerFilter` (same class, same `prefix` config, same `addPrefix`/`stripPrefix` helpers as
-the topic-only version) now also implements:
+`TopicPrefixerFilter` (same class as the topic-only version) now also implements:
+
+> **Since this was written:** topic renaming and group renaming were originally the same `prefix`,
+> shared via `addPrefix`/`stripPrefix` helpers on the filter itself. They're now independently
+> configurable - a `NameRenamer` per target, each either a prefix or an explicit mapping - see
+> [README.md#configuration](README.md#configuration). Nothing below changes as a result: whichever
+> renaming strategy is chosen for groups is applied through exactly the same RPCs this document
+> describes.
 
 | RPC | What's renamed |
 |---|---|

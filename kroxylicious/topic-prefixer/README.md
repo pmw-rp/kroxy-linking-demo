@@ -13,12 +13,12 @@ topics created directly on the real source cluster (as this demo's other scripts
 
 This demo wants the opposite: the real topic (and, as of the `consumer-group-renaming` work, the
 real consumer group) on the source cluster keeps its real name, but *every* client of the proxy -
-including Redpanda's Shadow Link - sees it under a cosmetic `p_` prefix. That makes the prefix
-visible end-to-end, all the way through to the shadow cluster, which is the point of testing
-Kroxylicious here. `TopicPrefixerFilter` does exactly that: it adds the prefix on responses flowing
-from the backend towards a client, and strips it on requests flowing the other way. Topics starting
-with `_` (Redpanda's `_schemas` topic, Kafka's own `__consumer_offsets`, etc.) are left alone, so
-Schema Registry replication keeps working unmodified.
+including Redpanda's Shadow Link - sees it renamed. That makes the rename visible end-to-end, all
+the way through to the shadow cluster, which is the point of testing Kroxylicious here.
+`TopicPrefixerFilter` does exactly that: it renames on responses flowing from the backend towards a
+client, and un-renames on requests flowing the other way. Topics starting with `_` (Redpanda's
+`_schemas` topic, Kafka's own `__consumer_offsets`, etc.) are left alone when the rename is a prefix
+(see [Configuration](#configuration)), so Schema Registry replication keeps working unmodified.
 
 It implements the RPCs Shadow Link needs to discover and replicate topics - `Metadata`,
 `DescribeConfigs` (Shadow Link reads a topic's config before creating the shadow-side topic - miss
@@ -35,6 +35,35 @@ It's demo-quality code, not a general-purpose substitute for `MultiTenant` - ext
 `TopicPrefixerFilter` further if your own testing finds gaps (e.g. producing through the proxy would
 also need `CreateTopicsRequestFilter`/`ProduceRequestFilter` and their response counterparts).
 
+## Configuration
+
+Topics and consumer groups are renamed independently, each via its own `RenamingConfig` - either a
+fixed `prefix` (added/stripped, and skipped for names starting with `_`), or an explicit before/after
+`mapping` (any name not in the table passes through unchanged - this filter never hides a name, only
+ever renames the ones you've told it to). Exactly one of `prefix`/`mapping` must be given per target.
+
+```yaml
+config:
+  topics:
+    prefix: "p_"
+  groups:
+    prefix: "p_"          # can be a different prefix, or use `mapping` instead - independent of topics
+```
+
+```yaml
+config:
+  topics:
+    mapping:
+      orders: renamed-orders
+      payments: renamed-payments
+  groups:
+    mapping:
+      billing-service: renamed-billing-service
+```
+
+Strategies can be mixed (e.g. a prefix for topics, an explicit mapping for groups). An empty
+`prefix` is a valid way to say "don't rename this one" while still renaming the other.
+
 ## How it's built and deployed
 
 `setup.sh` builds this module into a Kroxylicious proxy image (see `Dockerfile`) via a multi-stage
@@ -46,8 +75,8 @@ told to use it instead of the stock image via the `KROXYLICIOUS_IMAGE` env var o
 (see `resources/kroxylicious-operator.yaml`).
 
 `resources/kroxylicious-proxy.yaml` wires up a `KafkaProtocolFilter` referencing this filter by its
-fully-qualified class name (`demo.topicprefixer.TopicPrefixer`) with `prefix: "p_"`, and attaches it
-to a `VirtualKafkaCluster` that targets the source Redpanda cluster.
+fully-qualified class name (`demo.topicprefixer.TopicPrefixer`) with the config described above, and
+attaches it to a `VirtualKafkaCluster` that targets the source Redpanda cluster.
 
 ## Building/testing standalone
 

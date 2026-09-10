@@ -67,12 +67,11 @@ import io.kroxylicious.proxy.filter.SyncGroupRequestFilter;
 import static io.kroxylicious.kafka.transform.ApiVersionsResponseTransformers.removeApiKeys;
 
 /**
- * Presents every topic on the backing cluster to clients of the virtual cluster under a cosmetic
- * {@code prefix}, without ever renaming the real topic. See {@link TopicPrefixer} for the rationale.
- * <p>
- * Topics whose real name starts with {@code _} (Redpanda's Schema Registry {@code _schemas} topic,
- * Kafka's own {@code __consumer_offsets}, etc.) are deliberately left untouched, so infrastructure
- * that relies on well-known topic names keeps working unmodified through the proxy.
+ * Presents every topic and consumer group on the backing cluster to clients of the virtual cluster
+ * under a cosmetic rename, without ever renaming the real topic/group. Topics and consumer groups
+ * are renamed independently, by two separate {@link NameRenamer}s - see {@link TopicPrefixer} for
+ * the overall rationale and {@link RenamingConfig} for how each renamer is configured (a fixed
+ * prefix, or an explicit before/after mapping).
  * <p>
  * Covers the RPCs needed to discover and replicate both topics and consumer group offset commits:
  * {@code Metadata} (topic discovery), {@code DescribeConfigs} (reading a topic's configuration
@@ -80,10 +79,9 @@ import static io.kroxylicious.kafka.transform.ApiVersionsResponseTransformers.re
  * records); and, for consumer groups, {@code FindCoordinator}, {@code ListGroups},
  * {@code DescribeGroups}, {@code ConsumerGroupDescribe}, {@code JoinGroup}, {@code SyncGroup},
  * {@code Heartbeat}, {@code LeaveGroup}, {@code OffsetFetch}, {@code OffsetCommit} and
- * {@code OffsetDelete} - the group id gets the same cosmetic {@code prefix} as topic names, and
- * topic names embedded in offset commits are rewritten with exactly the same {@link #addPrefix}/
- * {@link #stripPrefix} used for the data-plane RPCs above, so a shadowed commit always points at
- * the same-named shadowed topic.
+ * {@code OffsetDelete} - topic names embedded in offset commits go through the same topic renamer
+ * as the data-plane RPCs above, so a shadowed commit always points at the same-named shadowed
+ * topic, regardless of how topics and groups are each configured to be renamed.
  * <p>
  * This is demo-quality code, not a general-purpose substitute for the {@code MultiTenant} filter -
  * extend it if your own testing finds gaps. Notably out of scope: producing through the proxy
@@ -121,7 +119,8 @@ class TopicPrefixerFilter implements
     /** Kafka protocol {@code FindCoordinatorRequest.CoordinatorType} for a consumer group (as opposed to a transaction id). */
     private static final byte COORDINATOR_TYPE_GROUP = 0;
 
-    private final String prefix;
+    private final NameRenamer topics;
+    private final NameRenamer groups;
 
     /**
      * {@code FindCoordinator} responses don't restate whether the lookup was for a group or a
@@ -133,31 +132,15 @@ class TopicPrefixerFilter implements
      */
     private final Set<Integer> pendingGroupCoordinatorLookups = new HashSet<>();
 
-    TopicPrefixerFilter(String prefix) {
-        this.prefix = prefix;
+    TopicPrefixerFilter(NameRenamer topics, NameRenamer groups) {
+        this.topics = topics;
+        this.groups = groups;
     }
 
     @Override
     public CompletionStage<ResponseFilterResult> onApiVersionsResponse(short apiVersion, ResponseHeaderData header, ApiVersionsResponseData response,
                                                                          FilterContext context) {
         return context.forwardResponse(header, API_VERSIONS_RESPONSE_INTERCEPTOR.transform(response));
-    }
-
-    private boolean isPrefixable(String name) {
-        return name != null && !name.isEmpty() && !name.startsWith("_");
-    }
-
-    /** Applied to names flowing from the real backend towards a client: add the cosmetic prefix. */
-    private String addPrefix(String name) {
-        return isPrefixable(name) ? prefix + name : name;
-    }
-
-    /** Applied to names flowing from a client towards the real backend: strip the cosmetic prefix. */
-    private String stripPrefix(String name) {
-        if (isPrefixable(name) && name.startsWith(prefix)) {
-            return name.substring(prefix.length());
-        }
-        return name;
     }
 
     // ---- topic metadata / data plane ----
@@ -167,7 +150,7 @@ class TopicPrefixerFilter implements
                                                                     FilterContext context) {
         if (request.topics() != null) {
             // request.topics() == null means "give me all the topics" - nothing to rewrite here.
-            request.topics().forEach(topic -> topic.setName(stripPrefix(topic.name())));
+            request.topics().forEach(topic -> topic.setName(topics.unrename(topic.name())));
         }
         return context.forwardRequest(header, request);
     }
@@ -175,21 +158,21 @@ class TopicPrefixerFilter implements
     @Override
     public CompletionStage<ResponseFilterResult> onMetadataResponse(short apiVersion, ResponseHeaderData header, MetadataResponseData response,
                                                                       FilterContext context) {
-        response.topics().forEach(topic -> topic.setName(addPrefix(topic.name())));
+        response.topics().forEach(topic -> topic.setName(topics.rename(topic.name())));
         return context.forwardResponse(header, response);
     }
 
     @Override
     public CompletionStage<RequestFilterResult> onListOffsetsRequest(short apiVersion, RequestHeaderData header, ListOffsetsRequestData request,
                                                                        FilterContext context) {
-        request.topics().forEach(topic -> topic.setName(stripPrefix(topic.name())));
+        request.topics().forEach(topic -> topic.setName(topics.unrename(topic.name())));
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<ResponseFilterResult> onListOffsetsResponse(short apiVersion, ResponseHeaderData header, ListOffsetsResponseData response,
                                                                         FilterContext context) {
-        response.topics().forEach(topic -> topic.setName(addPrefix(topic.name())));
+        response.topics().forEach(topic -> topic.setName(topics.rename(topic.name())));
         return context.forwardResponse(header, response);
     }
 
@@ -198,7 +181,7 @@ class TopicPrefixerFilter implements
                                                                           FilterContext context) {
         request.resources().stream()
                 .filter(resource -> resource.resourceType() == RESOURCE_TYPE_TOPIC)
-                .forEach(resource -> resource.setResourceName(stripPrefix(resource.resourceName())));
+                .forEach(resource -> resource.setResourceName(topics.unrename(resource.resourceName())));
         return context.forwardRequest(header, request);
     }
 
@@ -207,19 +190,19 @@ class TopicPrefixerFilter implements
                                                                             FilterContext context) {
         response.results().stream()
                 .filter(result -> result.resourceType() == RESOURCE_TYPE_TOPIC)
-                .forEach(result -> result.setResourceName(addPrefix(result.resourceName())));
+                .forEach(result -> result.setResourceName(topics.rename(result.resourceName())));
         return context.forwardResponse(header, response);
     }
 
     @Override
     public CompletionStage<RequestFilterResult> onFetchRequest(short apiVersion, RequestHeaderData header, FetchRequestData request, FilterContext context) {
-        request.topics().forEach(topic -> topic.setTopic(stripPrefix(topic.topic())));
+        request.topics().forEach(topic -> topic.setTopic(topics.unrename(topic.topic())));
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<ResponseFilterResult> onFetchResponse(short apiVersion, ResponseHeaderData header, FetchResponseData response, FilterContext context) {
-        response.responses().forEach(topic -> topic.setTopic(addPrefix(topic.topic())));
+        response.responses().forEach(topic -> topic.setTopic(topics.rename(topic.topic())));
         return context.forwardResponse(header, response);
     }
 
@@ -237,9 +220,9 @@ class TopicPrefixerFilter implements
             pendingGroupCoordinatorLookups.add(header.correlationId());
             // the singular `key` field was used up to and including version 3
             if (request.key() != null && !request.key().isEmpty()) {
-                request.setKey(stripPrefix(request.key()));
+                request.setKey(groups.unrename(request.key()));
             }
-            request.setCoordinatorKeys(request.coordinatorKeys().stream().map(this::stripPrefix).toList());
+            request.setCoordinatorKeys(request.coordinatorKeys().stream().map(groups::unrename).toList());
         }
         return context.forwardRequest(header, request);
     }
@@ -248,7 +231,7 @@ class TopicPrefixerFilter implements
     public CompletionStage<ResponseFilterResult> onFindCoordinatorResponse(short apiVersion, ResponseHeaderData header, FindCoordinatorResponseData response,
                                                                             FilterContext context) {
         if (pendingGroupCoordinatorLookups.remove(header.correlationId())) {
-            response.coordinators().forEach(coordinator -> coordinator.setKey(addPrefix(coordinator.key())));
+            response.coordinators().forEach(coordinator -> coordinator.setKey(groups.rename(coordinator.key())));
         }
         return context.forwardResponse(header, response);
     }
@@ -256,35 +239,35 @@ class TopicPrefixerFilter implements
     @Override
     public CompletionStage<ResponseFilterResult> onListGroupsResponse(short apiVersion, ResponseHeaderData header, ListGroupsResponseData response,
                                                                        FilterContext context) {
-        response.groups().forEach(group -> group.setGroupId(addPrefix(group.groupId())));
+        response.groups().forEach(group -> group.setGroupId(groups.rename(group.groupId())));
         return context.forwardResponse(header, response);
     }
 
     @Override
     public CompletionStage<RequestFilterResult> onDescribeGroupsRequest(short apiVersion, RequestHeaderData header, DescribeGroupsRequestData request,
                                                                          FilterContext context) {
-        request.setGroups(request.groups().stream().map(this::stripPrefix).toList());
+        request.setGroups(request.groups().stream().map(groups::unrename).toList());
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<ResponseFilterResult> onDescribeGroupsResponse(short apiVersion, ResponseHeaderData header, DescribeGroupsResponseData response,
                                                                            FilterContext context) {
-        response.groups().forEach(group -> group.setGroupId(addPrefix(group.groupId())));
+        response.groups().forEach(group -> group.setGroupId(groups.rename(group.groupId())));
         return context.forwardResponse(header, response);
     }
 
     @Override
     public CompletionStage<RequestFilterResult> onConsumerGroupDescribeRequest(short apiVersion, RequestHeaderData header, ConsumerGroupDescribeRequestData request,
                                                                                  FilterContext context) {
-        request.setGroupIds(request.groupIds().stream().map(this::stripPrefix).toList());
+        request.setGroupIds(request.groupIds().stream().map(groups::unrename).toList());
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<ResponseFilterResult> onConsumerGroupDescribeResponse(short apiVersion, ResponseHeaderData header,
                                                                                   ConsumerGroupDescribeResponseData response, FilterContext context) {
-        response.groups().forEach(group -> group.setGroupId(addPrefix(group.groupId())));
+        response.groups().forEach(group -> group.setGroupId(groups.rename(group.groupId())));
         return context.forwardResponse(header, response);
     }
 
@@ -294,49 +277,49 @@ class TopicPrefixerFilter implements
     @Override
     public CompletionStage<RequestFilterResult> onJoinGroupRequest(short apiVersion, RequestHeaderData header, JoinGroupRequestData request,
                                                                      FilterContext context) {
-        request.setGroupId(stripPrefix(request.groupId()));
+        request.setGroupId(groups.unrename(request.groupId()));
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<RequestFilterResult> onSyncGroupRequest(short apiVersion, RequestHeaderData header, SyncGroupRequestData request,
                                                                      FilterContext context) {
-        request.setGroupId(stripPrefix(request.groupId()));
+        request.setGroupId(groups.unrename(request.groupId()));
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<RequestFilterResult> onHeartbeatRequest(short apiVersion, RequestHeaderData header, HeartbeatRequestData request,
                                                                      FilterContext context) {
-        request.setGroupId(stripPrefix(request.groupId()));
+        request.setGroupId(groups.unrename(request.groupId()));
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<RequestFilterResult> onLeaveGroupRequest(short apiVersion, RequestHeaderData header, LeaveGroupRequestData request,
                                                                      FilterContext context) {
-        request.setGroupId(stripPrefix(request.groupId()));
+        request.setGroupId(groups.unrename(request.groupId()));
         return context.forwardRequest(header, request);
     }
 
     // ---- consumer group offsets (commits) ----
-    // Topic names here are rewritten with exactly the same addPrefix/stripPrefix as the data-plane
-    // RPCs above, so a commit always points at the same-named shadowed topic.
+    // Topic names here go through the same `topics` renamer as the data-plane RPCs above, so a
+    // commit always points at the same-named shadowed topic.
 
     @Override
     public CompletionStage<RequestFilterResult> onOffsetFetchRequest(short apiVersion, RequestHeaderData header, OffsetFetchRequestData request,
                                                                       FilterContext context) {
         // the singular groupId/topics fields were used up to and including version 7
         if (request.groupId() != null && !request.groupId().isEmpty()) {
-            request.setGroupId(stripPrefix(request.groupId()));
+            request.setGroupId(groups.unrename(request.groupId()));
         }
         if (request.topics() != null) {
-            request.topics().forEach(topic -> topic.setName(stripPrefix(topic.name())));
+            request.topics().forEach(topic -> topic.setName(topics.unrename(topic.name())));
         }
         request.groups().forEach(requestGroup -> {
-            requestGroup.setGroupId(stripPrefix(requestGroup.groupId()));
+            requestGroup.setGroupId(groups.unrename(requestGroup.groupId()));
             if (requestGroup.topics() != null) {
-                requestGroup.topics().forEach(topic -> topic.setName(stripPrefix(topic.name())));
+                requestGroup.topics().forEach(topic -> topic.setName(topics.unrename(topic.name())));
             }
         });
         return context.forwardRequest(header, request);
@@ -345,10 +328,10 @@ class TopicPrefixerFilter implements
     @Override
     public CompletionStage<ResponseFilterResult> onOffsetFetchResponse(short apiVersion, ResponseHeaderData header, OffsetFetchResponseData response,
                                                                         FilterContext context) {
-        response.topics().forEach(topic -> topic.setName(addPrefix(topic.name())));
+        response.topics().forEach(topic -> topic.setName(topics.rename(topic.name())));
         response.groups().forEach(responseGroup -> {
-            responseGroup.setGroupId(addPrefix(responseGroup.groupId()));
-            responseGroup.topics().forEach(topic -> topic.setName(addPrefix(topic.name())));
+            responseGroup.setGroupId(groups.rename(responseGroup.groupId()));
+            responseGroup.topics().forEach(topic -> topic.setName(topics.rename(topic.name())));
         });
         return context.forwardResponse(header, response);
     }
@@ -356,30 +339,30 @@ class TopicPrefixerFilter implements
     @Override
     public CompletionStage<RequestFilterResult> onOffsetCommitRequest(short apiVersion, RequestHeaderData header, OffsetCommitRequestData request,
                                                                        FilterContext context) {
-        request.setGroupId(stripPrefix(request.groupId()));
-        request.topics().forEach(topic -> topic.setName(stripPrefix(topic.name())));
+        request.setGroupId(groups.unrename(request.groupId()));
+        request.topics().forEach(topic -> topic.setName(topics.unrename(topic.name())));
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<ResponseFilterResult> onOffsetCommitResponse(short apiVersion, ResponseHeaderData header, OffsetCommitResponseData response,
                                                                          FilterContext context) {
-        response.topics().forEach(topic -> topic.setName(addPrefix(topic.name())));
+        response.topics().forEach(topic -> topic.setName(topics.rename(topic.name())));
         return context.forwardResponse(header, response);
     }
 
     @Override
     public CompletionStage<RequestFilterResult> onOffsetDeleteRequest(short apiVersion, RequestHeaderData header, OffsetDeleteRequestData request,
                                                                        FilterContext context) {
-        request.setGroupId(stripPrefix(request.groupId()));
-        request.topics().forEach(topic -> topic.setName(stripPrefix(topic.name())));
+        request.setGroupId(groups.unrename(request.groupId()));
+        request.topics().forEach(topic -> topic.setName(topics.unrename(topic.name())));
         return context.forwardRequest(header, request);
     }
 
     @Override
     public CompletionStage<ResponseFilterResult> onOffsetDeleteResponse(short apiVersion, ResponseHeaderData header, OffsetDeleteResponseData response,
                                                                          FilterContext context) {
-        response.topics().forEach(topic -> topic.setName(addPrefix(topic.name())));
+        response.topics().forEach(topic -> topic.setName(topics.rename(topic.name())));
         return context.forwardResponse(header, response);
     }
 }
