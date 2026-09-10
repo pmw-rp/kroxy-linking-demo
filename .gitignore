@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# JetBrains IDE
+.idea/
+
+# Claude Code session state
+.claude/
+
+# Credentials / secrets
+*-creds
+
+# Runtime artifacts from setup.sh
+*.pid
+
+# Maven build output (kroxylicious/topic-prefixer/)
+target/
